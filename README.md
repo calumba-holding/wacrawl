@@ -51,6 +51,12 @@ Import a fresh local archive:
 wacrawl import
 ```
 
+Optionally copy referenced media into the archive next to the DB:
+
+```bash
+wacrawl import --copy-media
+```
+
 Inspect what was imported:
 
 ```bash
@@ -105,6 +111,7 @@ wacrawl --db /tmp/wacrawl.db import
 - Opens WhatsApp data read-only.
 - Copies SQLite database, WAL, and SHM files into a temp snapshot before import.
 - Replaces only the `wacrawl` archive database.
+- With `import --copy-media`, copies referenced media into a managed folder next to the archive DB.
 - Does not modify WhatsApp databases, settings, contacts, chats, or media.
 - Does not use the WhatsApp network protocol.
 - Does not upload data.
@@ -142,6 +149,13 @@ Imports:
 - group participants
 - messages
 - media metadata and local media paths
+
+Use `--copy-media` to also copy existing referenced media files into
+`dirname(--db)/media/imports/<import-id>/`. The original WhatsApp media path is
+preserved as `media_path`; copied files are recorded separately as
+`archived_media_path` relative to `dirname(--db)`, so the DB and `media/` folder
+can be moved together. Missing media files do not fail the import; they are
+reported as `missing_media_files`.
 
 ### `status`
 

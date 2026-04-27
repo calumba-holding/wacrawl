@@ -13,7 +13,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 1
+const schemaVersion = 2
 
 type Store struct {
 	db   *sql.DB
@@ -21,16 +21,21 @@ type Store struct {
 }
 
 type ImportStats struct {
-	SourcePath    string    `json:"source_path"`
-	DBPath        string    `json:"db_path"`
-	Chats         int       `json:"chats"`
-	Contacts      int       `json:"contacts"`
-	Groups        int       `json:"groups"`
-	Participants  int       `json:"participants"`
-	Messages      int       `json:"messages"`
-	MediaMessages int       `json:"media_messages"`
-	StartedAt     time.Time `json:"started_at"`
-	FinishedAt    time.Time `json:"finished_at"`
+	SourcePath        string    `json:"source_path"`
+	DBPath            string    `json:"db_path"`
+	Chats             int       `json:"chats"`
+	Contacts          int       `json:"contacts"`
+	Groups            int       `json:"groups"`
+	Participants      int       `json:"participants"`
+	Messages          int       `json:"messages"`
+	MediaMessages     int       `json:"media_messages"`
+	CopyMedia         bool      `json:"copy_media,omitempty"`
+	MediaDir          string    `json:"media_dir,omitempty"`
+	MediaImportID     string    `json:"media_import_id,omitempty"`
+	CopiedMediaFiles  int       `json:"copied_media_files,omitempty"`
+	MissingMediaFiles int       `json:"missing_media_files,omitempty"`
+	StartedAt         time.Time `json:"started_at"`
+	FinishedAt        time.Time `json:"finished_at"`
 }
 
 type Status struct {
@@ -90,24 +95,25 @@ type GroupParticipant struct {
 }
 
 type Message struct {
-	SourcePK    int64     `json:"source_pk"`
-	ChatJID     string    `json:"chat_jid"`
-	ChatName    string    `json:"chat_name,omitempty"`
-	MessageID   string    `json:"message_id"`
-	SenderJID   string    `json:"sender_jid,omitempty"`
-	SenderName  string    `json:"sender_name,omitempty"`
-	Timestamp   time.Time `json:"timestamp"`
-	FromMe      bool      `json:"from_me"`
-	Text        string    `json:"text,omitempty"`
-	RawType     int       `json:"raw_type"`
-	MessageType string    `json:"message_type,omitempty"`
-	MediaType   string    `json:"media_type,omitempty"`
-	MediaTitle  string    `json:"media_title,omitempty"`
-	MediaPath   string    `json:"media_path,omitempty"`
-	MediaURL    string    `json:"media_url,omitempty"`
-	MediaSize   int64     `json:"media_size,omitempty"`
-	Starred     bool      `json:"starred,omitempty"`
-	Snippet     string    `json:"snippet,omitempty"`
+	SourcePK          int64     `json:"source_pk"`
+	ChatJID           string    `json:"chat_jid"`
+	ChatName          string    `json:"chat_name,omitempty"`
+	MessageID         string    `json:"message_id"`
+	SenderJID         string    `json:"sender_jid,omitempty"`
+	SenderName        string    `json:"sender_name,omitempty"`
+	Timestamp         time.Time `json:"timestamp"`
+	FromMe            bool      `json:"from_me"`
+	Text              string    `json:"text,omitempty"`
+	RawType           int       `json:"raw_type"`
+	MessageType       string    `json:"message_type,omitempty"`
+	MediaType         string    `json:"media_type,omitempty"`
+	MediaTitle        string    `json:"media_title,omitempty"`
+	MediaPath         string    `json:"media_path,omitempty"`
+	ArchivedMediaPath string    `json:"archived_media_path,omitempty"`
+	MediaURL          string    `json:"media_url,omitempty"`
+	MediaSize         int64     `json:"media_size,omitempty"`
+	Starred           bool      `json:"starred,omitempty"`
+	Snippet           string    `json:"snippet,omitempty"`
 }
 
 type MessageFilter struct {
@@ -168,10 +174,25 @@ func (s *Store) migrate(ctx context.Context) error {
 	if _, err := s.db.ExecContext(ctx, schemaSQL); err != nil {
 		return fmt.Errorf("migrate schema: %w", err)
 	}
+	if err := s.ensureArchivedMediaPathColumn(ctx); err != nil {
+		return fmt.Errorf("migrate messages.archived_media_path: %w", err)
+	}
 	if _, err := s.db.ExecContext(ctx, fmt.Sprintf("pragma user_version = %d", schemaVersion)); err != nil {
 		return fmt.Errorf("set schema version: %w", err)
 	}
 	return nil
+}
+
+func (s *Store) ensureArchivedMediaPathColumn(ctx context.Context) error {
+	var exists int
+	if err := s.db.QueryRowContext(ctx, `select count(*) from pragma_table_info('messages') where name='archived_media_path'`).Scan(&exists); err != nil {
+		return err
+	}
+	if exists != 0 {
+		return nil
+	}
+	_, err := s.db.ExecContext(ctx, "alter table messages add column archived_media_path text")
+	return err
 }
 
 func (s *Store) ReplaceAll(ctx context.Context, stats ImportStats, contacts []Contact, chats []Chat, groups []Group, participants []GroupParticipant, messages []Message) error {
@@ -219,8 +240,8 @@ func (s *Store) ReplaceAll(ctx context.Context, stats ImportStats, contacts []Co
 		}
 	}
 	for _, m := range messages {
-		if _, err := tx.ExecContext(ctx, `insert into messages(source_pk, chat_jid, chat_name, msg_id, sender_jid, sender_name, ts, from_me, text, raw_type, message_type, media_type, media_title, media_path, media_url, media_size, starred) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-			m.SourcePK, m.ChatJID, m.ChatName, m.MessageID, m.SenderJID, m.SenderName, unix(m.Timestamp), boolInt(m.FromMe), m.Text, m.RawType, m.MessageType, m.MediaType, m.MediaTitle, m.MediaPath, m.MediaURL, m.MediaSize, boolInt(m.Starred)); err != nil {
+		if _, err := tx.ExecContext(ctx, `insert into messages(source_pk, chat_jid, chat_name, msg_id, sender_jid, sender_name, ts, from_me, text, raw_type, message_type, media_type, media_title, media_path, archived_media_path, media_url, media_size, starred) values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			m.SourcePK, m.ChatJID, m.ChatName, m.MessageID, m.SenderJID, m.SenderName, unix(m.Timestamp), boolInt(m.FromMe), m.Text, m.RawType, m.MessageType, m.MediaType, m.MediaTitle, m.MediaPath, m.ArchivedMediaPath, m.MediaURL, m.MediaSize, boolInt(m.Starred)); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `insert into messages_fts(rowid, text, chat, sender, media) values((select rowid from messages where source_pk=?), ?, ?, ?, ?)`,
@@ -310,7 +331,7 @@ func (s *Store) Messages(ctx context.Context, filter MessageFilter) ([]Message, 
 	if filter.Limit <= 0 {
 		filter.Limit = 50
 	}
-	query := `select source_pk, chat_jid, chat_name, msg_id, sender_jid, sender_name, ts, from_me, text, raw_type, message_type, media_type, media_title, media_path, media_url, media_size, starred, '' from messages where 1=1`
+	query := `select source_pk, chat_jid, chat_name, msg_id, sender_jid, sender_name, ts, from_me, text, raw_type, message_type, media_type, media_title, media_path, archived_media_path, media_url, media_size, starred, '' from messages where 1=1`
 	var args []any
 	query, args = applyMessageFilters(query, args, filter, false)
 	if filter.Asc {
@@ -329,7 +350,7 @@ func (s *Store) Search(ctx context.Context, filter MessageFilter) ([]Message, er
 	if filter.Limit <= 0 {
 		filter.Limit = 50
 	}
-	query := `select m.source_pk, m.chat_jid, m.chat_name, m.msg_id, m.sender_jid, m.sender_name, m.ts, m.from_me, m.text, m.raw_type, m.message_type, m.media_type, m.media_title, m.media_path, m.media_url, m.media_size, m.starred, snippet(messages_fts, 0, '[', ']', '...', 12) from messages_fts f join messages m on m.rowid=f.rowid where messages_fts match ?`
+	query := `select m.source_pk, m.chat_jid, m.chat_name, m.msg_id, m.sender_jid, m.sender_name, m.ts, m.from_me, m.text, m.raw_type, m.message_type, m.media_type, m.media_title, m.media_path, m.archived_media_path, m.media_url, m.media_size, m.starred, snippet(messages_fts, 0, '[', ']', '...', 12) from messages_fts f join messages m on m.rowid=f.rowid where messages_fts match ?`
 	args := []any{filter.Query}
 	query, args = applyMessageFilters(query, args, filter, true)
 	query += " order by bm25(messages_fts) limit ?"
@@ -379,7 +400,7 @@ func scanMessages(ctx context.Context, db *sql.DB, query string, args ...any) ([
 		var m Message
 		var ts int64
 		var fromMe, starred int
-		if err := rows.Scan(&m.SourcePK, &m.ChatJID, &m.ChatName, &m.MessageID, &m.SenderJID, &m.SenderName, &ts, &fromMe, &m.Text, &m.RawType, &m.MessageType, &m.MediaType, &m.MediaTitle, &m.MediaPath, &m.MediaURL, &m.MediaSize, &starred, &m.Snippet); err != nil {
+		if err := rows.Scan(&m.SourcePK, &m.ChatJID, &m.ChatName, &m.MessageID, &m.SenderJID, &m.SenderName, &ts, &fromMe, &m.Text, &m.RawType, &m.MessageType, &m.MediaType, &m.MediaTitle, &m.MediaPath, &m.ArchivedMediaPath, &m.MediaURL, &m.MediaSize, &starred, &m.Snippet); err != nil {
 			return nil, err
 		}
 		m.Timestamp = fromUnix(ts)

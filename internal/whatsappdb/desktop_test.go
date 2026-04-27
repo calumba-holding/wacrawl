@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -69,6 +70,161 @@ func TestImportDesktopCoreDataShape(t *testing.T) {
 	}
 }
 
+func TestImportWithCopyMediaCopiesAndRecordsArchivedPath(t *testing.T) {
+	ctx := context.Background()
+	source := t.TempDir()
+	createFixtureDBs(t, source)
+	mediaPath := filepath.Join(source, "Media", "123@g.us", "a", "test.jpg")
+	if err := os.MkdirAll(filepath.Dir(mediaPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mediaPath, []byte("image bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	dbPath := filepath.Join(t.TempDir(), "wacrawl.db")
+	archive, err := store.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = archive.Close() }()
+
+	stats, err := ImportWithOptions(ctx, archive, source, ImportOptions{CopyMedia: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !stats.CopyMedia || stats.CopiedMediaFiles != 1 || stats.MissingMediaFiles != 0 || stats.MediaImportID == "" || stats.MediaDir == "" {
+		t.Fatalf("unexpected media stats: %+v", stats)
+	}
+
+	msgs, err := archive.Messages(ctx, store.MessageFilter{ChatJID: "123@g.us", HasMedia: true, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 1 {
+		t.Fatalf("expected one media message, got %d", len(msgs))
+	}
+	if msgs[0].MediaPath != mediaPath {
+		t.Fatalf("original media path changed: %q", msgs[0].MediaPath)
+	}
+	if !strings.HasPrefix(msgs[0].ArchivedMediaPath, "media/imports/"+stats.MediaImportID+"/") {
+		t.Fatalf("unexpected archived path: %q", msgs[0].ArchivedMediaPath)
+	}
+	copied := filepath.Join(filepath.Dir(dbPath), filepath.FromSlash(msgs[0].ArchivedMediaPath))
+	got, err := os.ReadFile(copied)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "image bytes" {
+		t.Fatalf("copied content mismatch: %q", got)
+	}
+}
+
+func TestImportWithCopyMediaCleansOldImportDirs(t *testing.T) {
+	ctx := context.Background()
+	source := t.TempDir()
+	createFixtureDBs(t, source)
+	mediaPath := filepath.Join(source, "Media", "123@g.us", "a", "test.jpg")
+	if err := os.MkdirAll(filepath.Dir(mediaPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mediaPath, []byte("image bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	dbPath := filepath.Join(t.TempDir(), "wacrawl.db")
+	archive, err := store.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = archive.Close() }()
+
+	mediaDir := filepath.Join(filepath.Dir(dbPath), "media")
+	first, err := ImportWithOptions(ctx, archive, source, ImportOptions{CopyMedia: true, MediaDir: mediaDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstDir := filepath.Join(mediaDir, "imports", first.MediaImportID)
+	if _, err := os.Stat(firstDir); err != nil {
+		t.Fatal(err)
+	}
+	second, err := ImportWithOptions(ctx, archive, source, ImportOptions{CopyMedia: true, MediaDir: mediaDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.MediaImportID == second.MediaImportID {
+		t.Fatal("expected unique media import IDs")
+	}
+	if _, err := os.Stat(firstDir); !os.IsNotExist(err) {
+		t.Fatalf("old import dir should be removed, stat err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(mediaDir, "imports", second.MediaImportID)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestImportWithCopyMediaFallsBackToMessageMediaDir(t *testing.T) {
+	ctx := context.Background()
+	source := t.TempDir()
+	createFixtureDBs(t, source)
+	mediaPath := filepath.Join(source, "Message", "Media", "123@g.us", "a", "test.jpg")
+	if err := os.MkdirAll(filepath.Dir(mediaPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(mediaPath, []byte("message media bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	dbPath := filepath.Join(t.TempDir(), "wacrawl.db")
+	archive, err := store.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = archive.Close() }()
+
+	stats, err := ImportWithOptions(ctx, archive, source, ImportOptions{CopyMedia: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.CopiedMediaFiles != 1 || stats.MissingMediaFiles != 0 {
+		t.Fatalf("unexpected media stats: %+v", stats)
+	}
+	msgs, err := archive.Messages(ctx, store.MessageFilter{ChatJID: "123@g.us", HasMedia: true, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 1 || !strings.Contains(msgs[0].ArchivedMediaPath, "/Message/Media/") {
+		t.Fatalf("unexpected archived fallback path: %+v", msgs)
+	}
+}
+
+func TestImportWithCopyMediaMissingIsNonFatal(t *testing.T) {
+	ctx := context.Background()
+	source := t.TempDir()
+	createFixtureDBs(t, source)
+	dbPath := filepath.Join(t.TempDir(), "wacrawl.db")
+	archive, err := store.Open(ctx, dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = archive.Close() }()
+
+	stats, err := ImportWithOptions(ctx, archive, source, ImportOptions{CopyMedia: true, MediaDir: filepath.Join(filepath.Dir(dbPath), "media")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stats.CopiedMediaFiles != 0 || stats.MissingMediaFiles != 1 {
+		t.Fatalf("unexpected media stats: %+v", stats)
+	}
+	msgs, err := archive.Messages(ctx, store.MessageFilter{ChatJID: "123@g.us", HasMedia: true, Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msgs) != 1 || msgs[0].MediaPath == "" || msgs[0].ArchivedMediaPath != "" {
+		t.Fatalf("unexpected media paths for missing file: %+v", msgs)
+	}
+}
+
 func TestDiscoverAndHelpers(t *testing.T) {
 	ctx := context.Background()
 	source := t.TempDir()
@@ -116,6 +272,12 @@ func TestDiscoverAndHelpers(t *testing.T) {
 	}
 	if err := copyFileIfExists(filepath.Join(source, "missing.sqlite"), filepath.Join(t.TempDir(), "missing.sqlite")); err != nil {
 		t.Fatal(err)
+	}
+	if rel, ok := safeRel(source, filepath.Join(source, "Media", "file.jpg")); !ok || rel != filepath.Join("Media", "file.jpg") {
+		t.Fatalf("safeRel valid path = %q, %t", rel, ok)
+	}
+	if _, ok := safeRel(source, filepath.Join(filepath.Dir(source), "outside.jpg")); ok {
+		t.Fatal("safeRel should reject paths outside root")
 	}
 
 	if !appleNullTime(sql.NullFloat64{}).IsZero() {

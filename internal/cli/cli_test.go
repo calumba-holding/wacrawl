@@ -29,6 +29,7 @@ func TestRunEndToEnd(t *testing.T) {
 		{"version", []string{"--version"}, "0.1.1"},
 		{"doctor", []string{"--db", dbPath, "--source", source, "doctor"}, "message_rows"},
 		{"import", []string{"--db", dbPath, "--source", source, "import"}, "messages=3"},
+		{"import copy media", []string{"--db", dbPath, "--source", source, "import", "--copy-media"}, "missing_media_files=1"},
 		{"status", []string{"--db", dbPath, "status"}, "messages=3"},
 		{"chats", []string{"--db", dbPath, "chats", "--limit", "5"}, "Launch Group"},
 		{"messages", []string{"--db", dbPath, "messages", "--chat", "123@g.us", "--asc"}, "launch now"},

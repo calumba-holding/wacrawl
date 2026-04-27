@@ -122,6 +122,7 @@ func (a *app) runImport(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("import", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	source := fs.String("source", a.source, "")
+	copyMedia := fs.Bool("copy-media", false, "")
 	if err := fs.Parse(args); err != nil {
 		return usageErr(err)
 	}
@@ -129,7 +130,10 @@ func (a *app) runImport(ctx context.Context, args []string) error {
 		return usageErr(errors.New("import takes flags only"))
 	}
 	return a.withStore(ctx, func(st *store.Store) error {
-		stats, err := whatsappdb.Import(ctx, st, *source)
+		stats, err := whatsappdb.ImportWithOptions(ctx, st, *source, whatsappdb.ImportOptions{
+			CopyMedia: *copyMedia,
+			MediaDir:  filepath.Join(filepath.Dir(a.dbPath), "media"),
+		})
 		if err != nil {
 			return err
 		}
@@ -319,6 +323,11 @@ func (a *app) print(value any) error {
 	case store.ImportStats:
 		_, err := fmt.Fprintf(a.stdout, "source=%s\ndb=%s\nchats=%d\ncontacts=%d\ngroups=%d\nparticipants=%d\nmessages=%d\nmedia_messages=%d\n",
 			v.SourcePath, v.DBPath, v.Chats, v.Contacts, v.Groups, v.Participants, v.Messages, v.MediaMessages)
+		if err != nil || !v.CopyMedia {
+			return err
+		}
+		_, err = fmt.Fprintf(a.stdout, "copy_media=%t\nmedia_dir=%s\nmedia_import_id=%s\ncopied_media_files=%d\nmissing_media_files=%d\n",
+			v.CopyMedia, v.MediaDir, v.MediaImportID, v.CopiedMediaFiles, v.MissingMediaFiles)
 		return err
 	case store.Status:
 		_, err := fmt.Fprintf(a.stdout, "db=%s\nchats=%d\ncontacts=%d\ngroups=%d\nparticipants=%d\nmessages=%d\nmedia_messages=%d\noldest=%s\nnewest=%s\nlast_import=%s\nsource=%s\n",

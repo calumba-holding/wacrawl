@@ -59,6 +59,7 @@ create table if not exists messages (
 	media_type text,
 	media_title text,
 	media_path text,
+	archived_media_path text,
 	media_url text,
 	media_size integer,
 	starred integer not null default 0

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
@@ -23,7 +24,7 @@ func TestStoreReplaceStatusListSearch(t *testing.T) {
 	participants := []GroupParticipant{{GroupJID: "chat@g.us", UserJID: "alice@s.whatsapp.net", ContactName: "Alice", IsAdmin: true, IsActive: true}}
 	messages := []Message{
 		{SourcePK: 1, ChatJID: "chat@g.us", ChatName: "Chat", MessageID: "a", SenderJID: "alice@s.whatsapp.net", SenderName: "Alice", Timestamp: now.Add(-time.Minute), Text: "hello launch", RawType: 0, MessageType: "text"},
-		{SourcePK: 2, ChatJID: "chat@g.us", ChatName: "Chat", MessageID: "b", SenderJID: "me", SenderName: "me", Timestamp: now, FromMe: true, Text: "photo", RawType: 1, MessageType: "image", MediaType: "image", MediaTitle: "launch image", MediaPath: "/tmp/image.jpg", MediaSize: 123},
+		{SourcePK: 2, ChatJID: "chat@g.us", ChatName: "Chat", MessageID: "b", SenderJID: "me", SenderName: "me", Timestamp: now, FromMe: true, Text: "photo", RawType: 1, MessageType: "image", MediaType: "image", MediaTitle: "launch image", MediaPath: "/tmp/image.jpg", ArchivedMediaPath: "media/imports/one/image.jpg", MediaSize: 123},
 	}
 	if err := st.ReplaceAll(ctx, stats, contacts, chats, groups, participants, messages); err != nil {
 		t.Fatal(err)
@@ -53,7 +54,7 @@ func TestStoreReplaceStatusListSearch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(filtered) != 1 || filtered[0].MessageID != "b" {
+	if len(filtered) != 1 || filtered[0].MessageID != "b" || filtered[0].ArchivedMediaPath != "media/imports/one/image.jpg" {
 		t.Fatalf("unexpected filtered messages: %+v", filtered)
 	}
 
@@ -84,6 +85,52 @@ func TestStoreReplaceStatusListSearch(t *testing.T) {
 	}
 	if len(chatsOut) != 1 || chatsOut[0].JID != "chat@g.us" {
 		t.Fatalf("unexpected chats: %+v", chatsOut)
+	}
+}
+
+func TestOpenMigratesArchivedMediaPathColumn(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "old.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`create table messages (
+		rowid integer primary key autoincrement,
+		source_pk integer not null unique,
+		chat_jid text not null,
+		chat_name text,
+		msg_id text not null,
+		sender_jid text,
+		sender_name text,
+		ts integer not null,
+		from_me integer not null,
+		text text,
+		raw_type integer not null,
+		message_type text,
+		media_type text,
+		media_title text,
+		media_path text,
+		media_url text,
+		media_size integer,
+		starred integer not null default 0
+	)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	st, err := Open(context.Background(), dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = st.Close() }()
+	var exists int
+	if err := st.DB().QueryRow(`select count(*) from pragma_table_info('messages') where name='archived_media_path'`).Scan(&exists); err != nil {
+		t.Fatal(err)
+	}
+	if exists != 1 {
+		t.Fatal("archived_media_path column not added")
 	}
 }
 

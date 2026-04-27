@@ -53,6 +53,11 @@ type Data struct {
 	MediaCount   int
 }
 
+type ImportOptions struct {
+	CopyMedia bool
+	MediaDir  string
+}
+
 func DefaultPath() string {
 	home, _ := os.UserHomeDir()
 	if runtime.GOOS == "darwin" {
@@ -155,8 +160,15 @@ func Extract(ctx context.Context, snap Snapshot) (Data, error) {
 }
 
 func Import(ctx context.Context, st *store.Store, path string) (store.ImportStats, error) {
+	return ImportWithOptions(ctx, st, path, ImportOptions{})
+}
+
+func ImportWithOptions(ctx context.Context, st *store.Store, path string, opts ImportOptions) (store.ImportStats, error) {
 	sourcePath := defaultedPath(path)
-	stats := store.ImportStats{SourcePath: sourcePath, DBPath: st.Path(), StartedAt: time.Now().UTC()}
+	stats := store.ImportStats{SourcePath: sourcePath, DBPath: st.Path(), StartedAt: time.Now().UTC(), CopyMedia: opts.CopyMedia}
+	if opts.CopyMedia {
+		stats.MediaDir = opts.MediaDir
+	}
 	snap, err := SnapshotPath(sourcePath)
 	if err != nil {
 		return stats, err
@@ -172,11 +184,140 @@ func Import(ctx context.Context, st *store.Store, path string) (store.ImportStat
 	stats.Participants = len(data.Participants)
 	stats.Messages = len(data.Messages)
 	stats.MediaMessages = data.MediaCount
+	var newMediaImportDir string
+	if opts.CopyMedia {
+		if opts.MediaDir == "" {
+			opts.MediaDir = filepath.Join(filepath.Dir(st.Path()), "media")
+			stats.MediaDir = opts.MediaDir
+		}
+		newMediaImportDir, err = archiveMedia(ctx, sourcePath, filepath.Dir(st.Path()), opts.MediaDir, &data, &stats)
+		if err != nil {
+			return stats, err
+		}
+	}
 	stats.FinishedAt = time.Now().UTC()
 	if err := st.ReplaceAll(ctx, stats, data.Contacts, data.Chats, data.Groups, data.Participants, data.Messages); err != nil {
+		if newMediaImportDir != "" {
+			_ = os.RemoveAll(newMediaImportDir)
+		}
 		return stats, err
 	}
+	if opts.CopyMedia {
+		_ = cleanupOldMediaImports(opts.MediaDir, stats.MediaImportID)
+	}
 	return stats, nil
+}
+
+func archiveMedia(ctx context.Context, sourceRoot, dbDir, mediaDir string, data *Data, stats *store.ImportStats) (string, error) {
+	importID := stats.StartedAt.UTC().Format("20060102-150405.000000000")
+	stats.MediaImportID = importID
+	stagingDir := filepath.Join(mediaDir, ".staging-"+importID)
+	finalDir := filepath.Join(mediaDir, "imports", importID)
+	if err := os.RemoveAll(stagingDir); err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(stagingDir, 0o700); err != nil {
+		return "", err
+	}
+	defer func() { _ = os.RemoveAll(stagingDir) }()
+
+	seen := map[string]bool{}
+	for i := range data.Messages {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		msg := &data.Messages[i]
+		if strings.TrimSpace(msg.MediaPath) == "" {
+			continue
+		}
+		srcPath, rel, ok, err := mediaSourcePath(sourceRoot, msg.MediaPath)
+		if err != nil {
+			return "", err
+		}
+		if !ok {
+			stats.MissingMediaFiles++
+			continue
+		}
+		dst := filepath.Join(stagingDir, rel)
+		if !seen[dst] {
+			if err := copyFileIfExists(srcPath, dst); err != nil {
+				return "", err
+			}
+			seen[dst] = true
+			stats.CopiedMediaFiles++
+		}
+		finalPath := filepath.Join(finalDir, rel)
+		archiveRel, err := filepath.Rel(dbDir, finalPath)
+		if err != nil {
+			return "", err
+		}
+		msg.ArchivedMediaPath = filepath.ToSlash(archiveRel)
+	}
+	if err := os.MkdirAll(filepath.Dir(finalDir), 0o700); err != nil {
+		return "", err
+	}
+	if err := os.RemoveAll(finalDir); err != nil {
+		return "", err
+	}
+	if err := os.Rename(stagingDir, finalDir); err != nil {
+		return "", err
+	}
+	return finalDir, nil
+}
+
+func mediaSourcePath(sourceRoot, mediaPath string) (string, string, bool, error) {
+	rel, ok := safeRel(sourceRoot, mediaPath)
+	if !ok {
+		return "", "", false, fmt.Errorf("media path escapes source root: %s", mediaPath)
+	}
+	if info, err := os.Stat(mediaPath); err == nil {
+		return mediaPath, rel, !info.IsDir(), nil
+	} else if !os.IsNotExist(err) {
+		return "", "", false, err
+	}
+	fallback := filepath.Join(sourceRoot, "Message", rel)
+	if info, err := os.Stat(fallback); err == nil {
+		return fallback, filepath.Join("Message", rel), !info.IsDir(), nil
+	} else if !os.IsNotExist(err) {
+		return "", "", false, err
+	}
+	return "", "", false, nil
+}
+
+func safeRel(root, path string) (string, bool) {
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return "", false
+	}
+	pathAbs, err := filepath.Abs(path)
+	if err != nil {
+		return "", false
+	}
+	rel, err := filepath.Rel(rootAbs, pathAbs)
+	if err != nil || rel == "." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || rel == ".." || filepath.IsAbs(rel) {
+		return "", false
+	}
+	return rel, true
+}
+
+func cleanupOldMediaImports(mediaDir, keepID string) error {
+	importsDir := filepath.Join(mediaDir, "imports")
+	entries, err := os.ReadDir(importsDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || entry.Name() == keepID {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(importsDir, entry.Name())); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func readContacts(ctx context.Context, path string) ([]store.Contact, map[string]string, error) {
